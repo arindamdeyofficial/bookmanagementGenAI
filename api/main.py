@@ -1,3 +1,4 @@
+#region imports
 import asyncio
 import json
 from sqlite3 import IntegrityError
@@ -13,10 +14,10 @@ from sqlalchemy.future import select
 from sqlalchemy.exc import SQLAlchemyError, OperationalError
 from automapper import mapper
 
-# Database connection string (replace with your details)
-DATABASE_URL = "postgresql+asyncpg://postgres:nakshal01051987@localhost:5432/bookreviewmgmt"
+#endregion imports
 
-# SQLAlchemy setup
+#region SQLAlchemy setup
+DATABASE_URL = "postgresql+asyncpg://postgres:nakshal01051987@localhost:5432/bookreviewmgmt"
 async_engine = create_async_engine(DATABASE_URL, connect_args={"command_timeout": 28.0})
 async_session_maker = async_sessionmaker(autocommit=False, autoflush=False, bind=async_engine, expire_on_commit=False)
 Base = declarative_base()
@@ -27,6 +28,7 @@ async def create_async_tables():
             await conn.run_sync(Base.metadata.create_all)
         except Exception as e:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+#endregion SQLAlchemy setup
 
 #region Model def: start
 class BookDto(Base):
@@ -109,7 +111,7 @@ def to_dict(obj):
             dict[field] = value
     return dict
 
-# CRUD operations for books
+#region book
 async def create_book(book: Book):  
         async with async_session_maker() as db:        
             try:
@@ -189,8 +191,9 @@ async def delete_book(book_id: int = Path(..., gt=0)):
         except Exception as e:  
             await db.rollback()
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+#endregion book
 
-# Endpoints for reviews
+#region reviews
 async def create_review(book_id: int = Path(..., gt=0), review: Review = Body(...)):
     async with async_session_maker() as db:
         try:
@@ -213,14 +216,16 @@ async def get_book_reviews(book_id: int = Path(..., gt=0), rating: Union[int, No
         try:
             query = select(ReviewDto).filter(ReviewDto.book_id == book_id)
             if rating is not None:
-                query = query.where(or_(Review.rating == rating, Review.rating - 1 == rating, Review.rating + 1 == rating))  # Example filter by rating (including +/- 1)
+                query = query.where(ReviewDto.rating == rating)
 
             results = await db.execute(query)
             reviews = results.scalars().all()
             return reviews
         except Exception as e:  # Handle broader exceptions
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+#endregion reviews
 
+#region recomendation
 async def get_book_summary(book_id: int = Path(..., gt=0)):
     async with async_session_maker() as db:
         try:
@@ -286,7 +291,9 @@ async def get_book_recommendations():
         books = results.scalars().all()
 
         return books
+#endregion recomendation
 
+#region user
 async def create_user():
     async with async_session_maker() as db:        
             try:
@@ -313,7 +320,7 @@ async def get_all_user():
             except Exception as e:  
                 await db.rollback()
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
+#endregion user
 
 #region fastAPI: start
 app = FastAPI()
@@ -348,7 +355,11 @@ async def createReview(book_id: int, review: Review):
     return await create_review(book_id, review)
 
 @app.get("/books/{book_id}/reviews")
-async def getBookReviews(book_id: int, rating: Union[int, None]):
+async def getBookReviews(book_id: int):
+    return await get_book_reviews(book_id)
+
+@app.get("/books/{book_id}/{rating}/reviews")
+async def getBookReviewsFilteredbyRating(book_id: int, rating: Union[int, None]):
     return await get_book_reviews(book_id, rating)
 
 @app.get("/books/{book_id}/summary")
