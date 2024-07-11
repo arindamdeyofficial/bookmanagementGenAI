@@ -120,6 +120,7 @@ async def create_book(book: Book):
                     db.add(bdto)
                 await db.commit()
                 await db.refresh(bdto)
+                generateBookSummary(bdto)
                 return book
             except IntegrityError as e:
                 # Handle potential database constraint violations
@@ -226,9 +227,44 @@ async def get_book_reviews(book_id: int = Path(..., gt=0), rating: Union[int, No
 #endregion reviews
 
 #region recomendation
+async def generateBookSummary(book: BookDto):
+    async with async_session_maker() as db:
+        try:
+            pdf_path = "C:/Users/bipla/OneDrive/Code/bookmgmtGenAi/llm/books/" + book.title
+            text = extract_text_from_pdf(book.title)
+            if text:
+                cleaned_text = clean_text(text)
+            booksummary = summaryModel(cleaned_text)
+            book.summary = booksummary
+            #save to db
+            update_book(book)
+            return {"status": "submitted to generate review"}
+        except Exception as e:  # Handle broader exceptions
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+async def summaryModel(text: str):
+    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline, AutoModelForCausalLM
+    import torch
+
+    pipe = pipeline("text-generation", model="meta-llama/Meta-Llama-3-8B", torch_dtype=torch.float16, device_map="auto")
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
+    model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
+    #C:\Users\bipla\.cache\huggingface\hub download location
+    #generate summary
+    # Tokenize the input
+    encoded_input = tokenizer(text, return_tensors="pt")  # Convert to tensors (optional)
+
+    # Generate output using the model
+    with torch.no_grad():  # Disable gradient calculation for efficiency
+        output = model.generate(**encoded_input)
+    # Decode the model's output tokens back to text
+    summary = tokenizer.decode(output[0], skip_special_tokens=True)
+    return summary
+
 async def get_book_summary(book_id: int = Path(..., gt=0)):
     async with async_session_maker() as db:
         try:
+            
             query = query = select(BookDto) \
             .options(joinedload(BookDto.reviews)) \
             .filter(BookDto.id == book_id)
@@ -250,7 +286,7 @@ async def get_book_summary(book_id: int = Path(..., gt=0)):
                 if book.content:
                     try:
                         # Replace with your preferred asynchronous summarization logic (NLTK, Gensim, etc.)
-                        summary = await summarize_text(book.content)  # Placeholder async function
+                        summary = await summarize_text_instant(book.content)  # Placeholder async function
                     except Exception as e:
                         print(f"Error during summarization: {e}")  # Log or handle the error
 
@@ -258,7 +294,7 @@ async def get_book_summary(book_id: int = Path(..., gt=0)):
         except Exception as e:  # Handle broader exceptions
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-async def summarize_text(text: str):
+async def summarize_text_instant(text: str):
     nlp = spacy.load("en_core_web_sm")  # Load a small English language model
     doc = nlp(text)  # Process the text with spaCy
 
@@ -322,6 +358,57 @@ async def get_all_user():
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 #endregion user
 
+#region reading pdf
+import re
+import PyPDF2
+
+def extract_text_from_pdf(pdf_path):
+  """
+  Extracts text content from a PDF file.
+
+  Args:
+      pdf_path: Path to the PDF file.
+
+  Returns:
+      A string containing the extracted text content.
+  """
+  try:
+    with open(pdf_path, 'rb') as pdf_file:
+      pdf_reader = PyPDF2.PdfReader(pdf_file)
+      text = ""
+      for page_num in range(len(pdf_reader.pages)):
+        page = pdf_reader.pages[page_num]
+        text += page.extract_text()
+      return text
+  except FileNotFoundError:
+    print(f"Error: PDF file not found at {pdf_path}")
+    return None
+  except Exception as e:  # Handle broader exceptions
+    print(e)
+
+def clean_text(text):
+  """
+  Performs basic cleaning on the extracted text.
+
+  Args:
+      text: The extracted text content from the PDF.
+
+  Returns:
+      A string containing the cleaned text.
+  """
+  # Replace common non-alphanumeric characters
+  cleaned_text = text.replace("\\n", " ").replace("\\t", " ")  # Replace newlines and tabs
+  cleaned_text = re.sub(r"[^a-zA-Z0-9\s]", "", cleaned_text)  # Remove non-alphanumeric characters (except space)
+
+  # You can add more cleaning steps here, such as:
+  # - Lowercasing all characters
+  # - Removing punctuation
+  # - Removing stop words
+
+  return cleaned_text
+
+#endregion reading pdf
+
 #region fastAPI: start
 app = FastAPI()
 
@@ -331,51 +418,193 @@ async def index():
 
 @app.post("/books", status_code=status.HTTP_201_CREATED)
 async def postBooks(book: Book):
+    """Creates a new book in the database.
+
+    This endpoint expects a JSON request body containing book details according to the BookCreate schema.
+
+    Args:
+        book: A BookCreate object containing book information.
+
+    Returns:
+        The newly created Book object in JSON format.
+    """
     return await create_book(book)
 
 @app.get("/books")
 async def getAllBooks():
+    """Retrieves a list of all books in the database.
+
+    Returns:
+        A JSON array containing all Book objects in the database.
+    """
     return await get_all_books()
 
 @app.get("/books/{book_id}")
 async def get_book_by_id(book_id: int):
+    """Retrieves a specific book by its ID.
+
+    Args:
+        book_id: The unique integer identifier of the book to retrieve.
+
+    Returns:
+        The Book object with the matching ID, or a 404 Not Found response if the book doesn't exist.
+    """
     book = await get_book(book_id)
     return book
 
 @app.put("/books/{book_id}")
 async def updateBook(book_id: int, book: Book):
+    """Updates an existing book in the database.
+
+    Args:
+        book_id: The unique integer identifier of the book to update.
+        book_updates: A BookUpdate object containing the new data for the book (fields to update).
+
+    Returns:
+        The updated Book object in JSON format, or a 404 Not Found response if the book doesn't exist.
+    """
     return await update_book(book_id, book)
 
 @app.delete("/books/{book_id}")
 async def deleteBook(book_id: int):
+    """Deletes a book from the database.
+
+    Args:
+        book_id: The unique integer identifier of the book to delete.
+
+    Returns:
+        A 204 No Content response upon successful deletion, or a 404 Not Found response if the book doesn't exist.
+    """
     return await delete_book(book_id)
 
 @app.post("/books/{book_id}/reviews", status_code=status.HTTP_201_CREATED)
 async def createReview(book_id: int, review: Review):
+    """Creates a new review for a specific book.
+
+    This endpoint allows users to submit reviews for books in your database.
+
+    Args:
+        book_id: The unique integer identifier of the book to which the review belongs.
+        review: A ReviewCreate object containing the details of the new review (content and rating).
+
+    Returns:
+        The newly created Review object in JSON format, including its automatically generated ID.
+
+    Raises:
+        HTTPException: A 404 Not Found exception if the specified book does not exist.
+    """
     return await create_review(book_id, review)
 
 @app.get("/books/{book_id}/reviews")
 async def getBookReviews(book_id: int):
+    """Retrieves all reviews for a specific book.
+
+    This endpoint allows users to retrieve a list of all reviews associated with a particular book in your database.
+
+    Args:
+        book_id: The unique integer identifier of the book for which to retrieve reviews.
+
+    Returns:
+        A JSON array containing all Review objects for the specified book, or a 404 Not Found response if the book doesn't exist.
+    """
     return await get_book_reviews(book_id)
 
 @app.get("/books/{book_id}/{rating}/reviews")
 async def getBookReviewsFilteredbyRating(book_id: int, rating: Union[int, None]):
+    """Retrieves reviews for a specific book, optionally filtered by rating.
+
+    This endpoint allows users to retrieve a list of reviews associated with a particular book in your database.
+    You can optionally filter the reviews by specifying a desired rating value.
+
+    Args:
+        book_id: The unique integer identifier of the book for which to retrieve reviews.
+        rating: An optional integer value representing the desired review rating. If omitted, all reviews are returned.
+
+    Returns:
+        A JSON array containing all matching Review objects for the specified book and rating (if provided),
+        or a 404 Not Found response if the book doesn't exist.
+
+    Raises:
+        HTTPException: A 400 Bad Request exception if the provided rating is outside the valid range.
+    """
     return await get_book_reviews(book_id, rating)
 
 @app.get("/books/{book_id}/summary")
 async def getBookSummary(book_id: int):
+    """Retrieves a summary of a book, including its average rating.
+
+    This endpoint attempts to generate a summary of the book's content and provides the average rating
+    based on all associated reviews. The specific method for generating the summary depends on your implementation.
+
+    Args:
+        book_id: The unique integer identifier of the book for which to retrieve the summary.
+
+    Returns:
+        A BookSummary object containing the generated summary text (if available) and the average rating.
+        If summary generation is not supported or the book doesn't exist, a 404 Not Found response is returned.
+    """
     return await get_book_summary(book_id)
 
 @app.get("/recommendations")
 async def getBookRecommendations():
+    """Retrieves recommendations for books based on your chosen recommendation strategy.
+
+    This endpoint allows you to retrieve a list of recommended books based on a specific recommendation strategy.
+    The actual implementation of the recommendation algorithm depends on your chosen approach.
+
+    **Possible strategies (implement one or more):**
+
+    - Collaborative Filtering: Recommends books similar to those users with similar tastes have reviewed highly.
+    - Content-Based Filtering: Recommends books with similar content or genre to books a user has reviewed positively.
+    - Hybrid Approaches: Combine collaborative and content-based filtering for more comprehensive recommendations.
+
+    **Current Implementation:**
+
+    (Replace this section with a description of the specific recommendation strategy you're using.)
+
+    Returns:
+        A JSON array containing recommended Book objects, or an empty list if no recommendations are found.
+    """
     return await get_book_recommendations()
 
 @app.put("/users")
 async def createusers():
+    """Creates a new user account with email and password.
+
+    This endpoint allows users to register for your application by providing their email address and a password.
+
+    **Security Note:** Passwords are hashed before storing them in the database, ensuring secure user authentication.
+
+    Args:
+        user: A UserCreate object containing the new user's email and password.
+        db: A database session dependency (injected through dependency injection).
+
+    Returns:
+        The newly created User object with basic user information (excluding password).
+
+    Raises:
+        HTTPException: A 400 Bad Request exception if the email is already in use.
+    """
     return await create_user()
 
 @app.get("/users")
 async def getallusers():
+    """Retrieves all users in the database (deprecated).
+
+    **Warning:** This endpoint is currently deprecated and exposes potentially sensitive user data. 
+    Retrieving all users can be a privacy and security concern.
+
+    For user data management, consider alternative approaches:
+
+    - User Authentication & Authorization: Implement user login and access control based on roles or permissions.
+    - User Self-Management: Provide endpoints for users to manage their own profiles.
+    - Admin User Management (Restricted Access): Create an admin role with limited access to user data for specific purposes.
+
+    This endpoint is intended for development or testing purposes only.
+
+    Returns:
+        A JSON array containing all User objects (not recommended for production).
+    """
     return await get_all_user()
 
 #endregion fastAPI: end
